@@ -1,0 +1,108 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CLIENT_SRC: github.com/xtaci/kcptun/client
+  SERVER_SRC: github.com/xtaci/kcptun/server
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}/${{ matrix.suffix }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: darwin, arch: amd64, suffix: amd64 }
+          - { os: darwin, arch: arm64, suffix: arm64 }
+          - { os: freebsd, arch: amd64, suffix: amd64 }
+          - { os: linux, arch: "386", suffix: "386" }
+          - { os: linux, arch: amd64, suffix: amd64 }
+          - { os: linux, arch: arm, goarm: "5", suffix: arm5 }
+          - { os: linux, arch: arm, goarm: "6", suffix: arm6 }
+          - { os: linux, arch: arm, goarm: "7", suffix: arm7 }
+          - { os: linux, arch: arm64, suffix: arm64 }
+          - { os: linux, arch: loong64, suffix: loong64 }
+          - { os: linux, arch: mips, gomips: softfloat, suffix: mips }
+          - { os: linux, arch: mipsle, gomips: softfloat, suffix: mipsle }
+          - { os: windows, arch: "386", suffix: "386" }
+          - { os: windows, arch: amd64, suffix: amd64 }
+          - { os: windows, arch: arm64, suffix: arm64 }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Build
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          GOARM: ${{ matrix.goarm }}
+          GOMIPS: ${{ matrix.gomips }}
+        run: |
+          set -e
+          VERSION="${GITHUB_REF_NAME}"
+          [ "${GITHUB_REF_TYPE}" = "tag" ] || VERSION=$(date -u +%Y%m%d)
+          LDFLAGS="-X main.VERSION=${VERSION} -s -w"
+
+          mkdir -p build
+          EXT=""
+          [ "${GOOS}" = "windows" ] && EXT=".exe"
+
+          CLIENT="build/client_${GOOS}_${{ matrix.suffix }}${EXT}"
+          SERVER="build/server_${GOOS}_${{ matrix.suffix }}${EXT}"
+
+          go build -mod=vendor -ldflags "${LDFLAGS}" -o "${CLIENT}" "${CLIENT_SRC}"
+          go build -mod=vendor -ldflags "${LDFLAGS}" -o "${SERVER}" "${SERVER_SRC}"
+
+          ARCHIVE="kcptun-${GOOS}-${{ matrix.suffix }}-${VERSION}.tar.gz"
+          tar -czf "build/${ARCHIVE}" -C build "$(basename "${CLIENT}")" "$(basename "${SERVER}")"
+          (cd build && sha1sum "${ARCHIVE}" > "${ARCHIVE}.sha1")
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: kcptun-${{ matrix.os }}-${{ matrix.suffix }}
+          path: |
+            build/*.tar.gz
+            build/*.sha1
+
+  release:
+    name: Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag'
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA1SUMS
+        run: |
+          cd dist
+          cat *.sha1 > SHA1SUMS
+          rm -f *.sha1
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/SHA1SUMS
+          generate_release_notes: false
